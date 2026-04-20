@@ -10,6 +10,8 @@ from app.services.match_catalog import detect_primary_catalog_profile
 
 MATCH_THRESHOLD = 0.50
 
+_MOJIBAKE_RE = re.compile(r"[ÐÑ]|Р[А-яA-Za-zЁё]|С[А-яA-Za-zЁё]|вЂ|Ѓ|�")
+
 _MATCH_PRIMARY_EXACT_ALIASES = {
     "reactnative": "reactnative",
     "flutter": "flutter",
@@ -194,6 +196,51 @@ _MATCH_REF_LOCATION_RE = re.compile(r"(?im)^(?:Локация|Location|Горо�
 
 def _looks_like_urlish(value: str) -> bool:
     return bool(_URLISH_RE.search(str(value or "").strip()))
+
+
+def _looks_broken_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(_MOJIBAKE_RE.search(text))
+
+
+def _repair_text_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or _looks_like_urlish(text):
+        return text
+
+    candidates = [text]
+    for encoding in ("cp1251", "latin1"):
+        try:
+            repaired = text.encode(encoding, errors="ignore").decode("utf-8", errors="ignore").strip()
+        except Exception:
+            repaired = ""
+        if repaired:
+            candidates.append(repaired)
+
+    def _score(candidate: str) -> tuple[int, int, int]:
+        cyr = len(re.findall(r"[А-Яа-яЁё]", candidate))
+        lat = len(re.findall(r"[A-Za-z]", candidate))
+        penalty = 1000 if _looks_broken_text(candidate) else 0
+        return (cyr + lat - penalty, cyr, lat)
+
+    best = max(candidates, key=_score)
+    if _looks_broken_text(best):
+        return ""
+    return best
+
+
+def _sanitize_match_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _sanitize_match_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_match_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_match_payload(item) for item in value]
+    if isinstance(value, str):
+        return _repair_text_value(value)
+    return value
 
 
 def _normalize_ref_text(value: Any) -> str:
@@ -1179,14 +1226,17 @@ def list_recent_matches(engine, limit: int = 20, *, source_fetcher: MCPSourceFet
         validated = _revalidate_recent_match(item)
         if not validated:
             continue
-        filtered.append(validated)
+        filtered.append(_sanitize_match_payload(validated))
         if len(filtered) >= limit:
             break
     if not source_fetcher:
         return filtered
 
     fetch_cache: dict[str, Any] = {}
-    return [_resolve_live_sheet_reference(item, source_fetcher=source_fetcher, cache=fetch_cache) for item in filtered]
+    return [
+        _sanitize_match_payload(_resolve_live_sheet_reference(item, source_fetcher=source_fetcher, cache=fetch_cache))
+        for item in filtered
+    ]
 
 
 def list_active_specialists_for_matching(engine, *, own_bench_url: Optional[str] = None) -> list[dict[str, Any]]:

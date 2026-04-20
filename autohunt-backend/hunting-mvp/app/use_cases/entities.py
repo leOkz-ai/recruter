@@ -10,6 +10,8 @@ from app.db.repo import build_search_text
 from app.services.app_settings import OWN_BENCH_SOURCE_URL_KEY, get_setting
 from app.use_cases import matching as matching_use_cases
 
+_MOJIBAKE_RE = re.compile(r"[ÐÑ]|Р[А-яA-Za-zЁё]|С[А-яA-Za-zЁё]|вЂ|Ѓ|�")
+
 
 def _parse_embedding_text(value: Any) -> list[float]:
     raw = str(value or "").strip()
@@ -22,6 +24,54 @@ def _parse_embedding_text(value: Any) -> list[float]:
     except Exception:
         pass
     return []
+
+
+def _looks_broken_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(_MOJIBAKE_RE.search(text))
+
+
+def _repair_text_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    candidates = [text]
+    for encoding in ("cp1251", "latin1"):
+        try:
+            repaired = text.encode(encoding, errors="ignore").decode("utf-8", errors="ignore").strip()
+        except Exception:
+            repaired = ""
+        if repaired:
+            candidates.append(repaired)
+
+    def _score(candidate: str) -> tuple[int, int, int]:
+        cyr = len(re.findall(r"[А-Яа-яЁё]", candidate))
+        lat = len(re.findall(r"[A-Za-z]", candidate))
+        penalty = 1000 if _looks_broken_text(candidate) else 0
+        return (cyr + lat - penalty, cyr, lat)
+
+    best = max(candidates, key=_score)
+    if _looks_broken_text(best):
+        return ""
+    return best
+
+
+def _clean_text(value: Any, fallback: str = "") -> str:
+    cleaned = _repair_text_value(value)
+    return cleaned or fallback
+
+
+def _clean_list(values: Any) -> list[str]:
+    raw_values = values if isinstance(values, list) else [values]
+    cleaned: list[str] = []
+    for value in raw_values:
+        text = _clean_text(value)
+        if text:
+            cleaned.append(text)
+    return cleaned
 
 
 def _entity_select(table: str, *, include_company: bool = False, include_internal: bool = False) -> str:
@@ -213,7 +263,7 @@ def get_specialist_matches(engine, ollama, specialist_id: str, *, limit: int = 2
 def _format_rate(hit: dict[str, Any]) -> str:
     rate_min = hit.get("rate_min")
     rate_max = hit.get("rate_max")
-    currency = str(hit.get("currency") or "").strip()
+    currency = _clean_text(hit.get("currency"))
     if rate_min and rate_max:
         return f"от {rate_min} до {rate_max} {currency}".strip()
     if rate_min:
@@ -224,7 +274,7 @@ def _format_rate(hit: dict[str, Any]) -> str:
 
 
 def _extract_manual_label(text_value: Any, labels: list[str]) -> str:
-    source = str(text_value or "")
+    source = _repair_text_value(text_value)
     if not source:
         return ""
     for label in labels:
@@ -236,15 +286,15 @@ def _extract_manual_label(text_value: Any, labels: list[str]) -> str:
 
 
 def _extract_manual_specialist_card_details(hit: dict[str, Any]) -> dict[str, str]:
-    source_display = str(hit.get("source_display") or "")
-    original_text = str(hit.get("original_text") or "")
+    source_display = _repair_text_value(hit.get("source_display"))
+    original_text = _repair_text_value(hit.get("original_text"))
     name = (
         _extract_manual_label(original_text, ["Имя", "Name", "Column 1"])
         or _extract_manual_label(source_display.replace("; ", "\n"), ["Специалист", "Кандидат", "Имя"])
     )
     location = (
         _extract_manual_label(original_text, ["Локация", "Location", "Город", "City"])
-        or str(hit.get("location") or "").strip()
+        or _clean_text(hit.get("location"))
     )
     sheet = (
         _extract_manual_label(source_display.replace("; ", "\n"), ["Лист", "Sheet"])
@@ -264,9 +314,9 @@ def _extract_manual_specialist_card_details(hit: dict[str, Any]) -> dict[str, st
     elif index:
         reference_parts.append(f"Позиция: {index}")
     return {
-        "display_name": name,
-        "identity_hint": " · ".join(identity_parts),
-        "reference": " · ".join(reference_parts),
+        "display_name": _clean_text(name),
+        "identity_hint": _clean_text(" · ".join(identity_parts)),
+        "reference": _clean_text(" · ".join(reference_parts)),
     }
 
 
@@ -275,20 +325,20 @@ def _manual_item_from_specialist(hit: dict[str, Any], *, source_bucket: str, sou
     details = _extract_manual_specialist_card_details(hit)
     return {
         "id": str(hit.get("id") or ""),
-        "title": str(hit.get("role") or "Unknown"),
+        "title": _clean_text(hit.get("role"), "Unknown"),
         "display_name": details["display_name"] or None,
-        "role_label": str(hit.get("role") or "Unknown"),
-        "subtitle": " • ".join(part for part in [str(hit.get("grade") or "").strip(), str(hit.get("location") or "").strip()] if part) or None,
+        "role_label": _clean_text(hit.get("role"), "Unknown"),
+        "subtitle": " • ".join(part for part in [_clean_text(hit.get("grade")), _clean_text(hit.get("location"))] if part) or None,
         "meta": _format_rate(hit),
         "source_url": str(hit.get("url") or hit.get("source_url") or "").strip() or None,
         "identity_hint": details["identity_hint"] or None,
         "reference": details["reference"] or None,
-        "tags": list(hit.get("stack") or []),
-        "overlap": list(components.get("stack_overlap") or []),
+        "tags": _clean_list(hit.get("stack") or []),
+        "overlap": _clean_list(components.get("stack_overlap") or []),
         "score": max(0, min(100, round(float(hit.get("sim") or 0.0) * 100))),
         "kind_label": "Бенч",
         "source_bucket": source_bucket,
-        "source_bucket_label": source_bucket_label,
+        "source_bucket_label": _clean_text(source_bucket_label),
     }
 
 
@@ -296,16 +346,16 @@ def _manual_item_from_vacancy(hit: dict[str, Any]) -> dict[str, Any]:
     components = hit.get("score_components") or {}
     return {
         "id": str(hit.get("id") or ""),
-        "title": str(hit.get("role") or "Unknown"),
+        "title": _clean_text(hit.get("role"), "Unknown"),
         "display_name": None,
         "role_label": None,
-        "subtitle": " • ".join(part for part in [str(hit.get("grade") or "").strip(), str(hit.get("location") or "").strip()] if part) or None,
+        "subtitle": " • ".join(part for part in [_clean_text(hit.get("grade")), _clean_text(hit.get("location"))] if part) or None,
         "meta": _format_rate(hit),
         "source_url": str(hit.get("url") or hit.get("source_url") or "").strip() or None,
         "identity_hint": None,
         "reference": None,
-        "tags": list(hit.get("stack") or []),
-        "overlap": list(components.get("stack_overlap") or []),
+        "tags": _clean_list(hit.get("stack") or []),
+        "overlap": _clean_list(components.get("stack_overlap") or []),
         "score": max(0, min(100, round(float(hit.get("sim") or 0.0) * 100))),
         "kind_label": "Вакансия",
         "source_bucket": None,

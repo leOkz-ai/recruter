@@ -449,7 +449,8 @@ function normalizeLog(item) {
 function normalizeMatch(item) {
   if (item && !Array.isArray(item)) {
     const source = item.source ?? item.origin ?? (item.is_internal || item.is_own_bench_source ? "own_bench" : "partner_bench");
-    const vacancyRole = firstNonEmptyString(item.vacancy?.role, item.vacancy_role, item.vacancy?.company, item.company, item.role, "—");
+    const vacancyRole = firstNonEmptyString(item.vacancy?.role, item.vacancy_role, item.role);
+    const vacancyCompany = firstNonEmptyString(item.vacancy?.company, item.company, item.vacancy_company, vacancyRole, "—");
     const specialistRole = firstNonEmptyString(
       item.candidate?.role,
       item.specialist_role,
@@ -459,6 +460,7 @@ function normalizeMatch(item) {
       "—"
     );
     const specialistName = parseSpecialistName(item, specialistRole);
+    const matchTitle = `${specialistName || specialistRole || "—"} → ${vacancyCompany || vacancyRole || "—"}`;
     const specialistLocation = firstNonEmptyString(
       item.specialist_live_location,
       item.candidate?.location,
@@ -490,13 +492,9 @@ function normalizeMatch(item) {
 
     return {
       score,
-      title: firstNonEmptyString(
-        item.title,
-        item.reason,
-        `${specialistName || specialistRole} → ${vacancyRole}`
-      ),
+      title: matchTitle,
       vacancy: {
-        company: firstNonEmptyString(item.vacancy?.company, item.company, item.vacancy_company, vacancyRole),
+        company: vacancyCompany,
         stack: toArray(item.vacancy?.stack ?? item.vacancy_stack ?? item.vacancy_skills),
         grade: firstNonEmptyString(item.vacancy?.grade, item.vacancy_grade, "—"),
         rate: firstNonEmptyString(vacancyRate, "—"),
